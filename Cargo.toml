@@ -1,0 +1,11 @@
+[package]
+name = "watchtogether"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+gl_generator = "0.14.0"
+
+[dependencies]
+glutin = "0.32.3"
+winit = "0.30.12"
