@@ -54,9 +54,15 @@ impl ApplicationHandler for App {
             .with_title("Watch Together");
 
         let raw_display_handle = event_loop.display_handle().unwrap().as_raw();
+        
+        #[cfg(windows)]
+        let gl_display =
+            unsafe { Display::new(raw_display_handle, DisplayApiPreference::Wgl(self.window.as_ref().unwrap().window_handle().unwrap().as_raw())).unwrap() };
 
+        #[cfg(unix)]
         let gl_display =
             unsafe { Display::new(raw_display_handle, DisplayApiPreference::Egl).unwrap() };
+
 
         let configs = unsafe { gl_display.find_configs(template).unwrap() };
 
