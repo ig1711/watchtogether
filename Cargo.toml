@@ -8,4 +8,5 @@ gl_generator = "0.14.0"
 
 [dependencies]
 glutin = "0.32.3"
+interprocess = "2.2.3"
 winit = "0.30.12"

@@ -14,10 +14,28 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, thread};
+use interprocess::local_socket::{GenericFilePath, Stream, prelude::*};
+use std::io::{BufReader, prelude::*};
 
 fn main() {
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
+    let event_loop_proxy = event_loop.create_proxy();
+
+    let name = "/tmp/example.sock".to_fs_name::<GenericFilePath>().unwrap();
+    let mut buffer = String::with_capacity(128);
+    let conn = Stream::connect(name).unwrap();
+    let (receiver, _sender) = conn.split();
+
+
+    thread::spawn(move || {
+        let mut conn = BufReader::new(receiver);
+        loop {
+            conn.read_line(&mut buffer).unwrap();
+            event_loop_proxy.send_event(UserEvent::IpcMessage(buffer.clone())).unwrap();
+            buffer.clear();
+        }
+    });
 
     let mut app = App::new();
 
@@ -42,7 +60,12 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+#[derive(Debug)]
+enum UserEvent {
+    IpcMessage(String),
+}
+
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
@@ -160,6 +183,14 @@ impl ApplicationHandler for App {
             }
 
             _ => (),
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::IpcMessage(msg) => {
+                println!("{}", msg);
+            },
         }
     }
 }
