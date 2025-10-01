@@ -53,6 +53,10 @@ impl ApplicationHandler for App {
             .with_transparent(true)
             .with_title("Watch Together");
 
+        let window = event_loop.create_window(window_attributes).unwrap();
+
+        self.window = Some(window);
+
         let raw_display_handle = event_loop.display_handle().unwrap().as_raw();
         
         #[cfg(windows)]
@@ -79,13 +83,12 @@ impl ApplicationHandler for App {
             })
             .unwrap();
 
-        let window = event_loop.create_window(window_attributes).unwrap();
 
-        let size = window.inner_size();
+        let size = self.window.as_ref().unwrap().inner_size();
         let width = size.width;
         let height = size.height;
 
-        let raw_window_handle = window.window_handle().unwrap().as_raw();
+        let raw_window_handle = self.window.as_ref().unwrap().window_handle().unwrap().as_raw();
 
         let surface_attributes = SurfaceAttributesBuilder::<WindowSurface>::new().build(
             raw_window_handle,
@@ -116,8 +119,6 @@ impl ApplicationHandler for App {
 
         self.gl_context = Some(possibly_current_context);
         self.gl_surface = Some(gl_surface);
-
-        self.window = Some(window);
 
         self.renderer
             .get_or_insert_with(|| Renderer::new(&gl_config.display()));
