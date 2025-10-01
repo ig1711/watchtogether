@@ -61,7 +61,7 @@ impl ApplicationHandler for App {
         
         #[cfg(windows)]
         let gl_display =
-            unsafe { Display::new(raw_display_handle, DisplayApiPreference::Wgl(self.window.as_ref().unwrap().window_handle().unwrap().as_raw())).unwrap() };
+            unsafe { Display::new(raw_display_handle, DisplayApiPreference::Wgl(Some(self.window.as_ref().unwrap().window_handle().unwrap().as_raw()))).unwrap() };
 
         #[cfg(unix)]
         let gl_display =
