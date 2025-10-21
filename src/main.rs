@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, rc::Rc};
 
 use glutin::{
     config::{ConfigTemplateBuilder, GlConfig},
@@ -10,9 +10,9 @@ use glutin::{
 
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
-    event::{ElementState, KeyEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
+    dpi::LogicalSize,
+    event::{ElementState, KeyEvent, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::{Key, NamedKey},
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
     window::{Window, WindowId},
@@ -31,9 +31,24 @@ use tokio::{
     sync::mpsc,
 };
 
+use libmpv2::{
+    Mpv,
+    render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType},
+};
+
+use std::ffi::{CString, c_void};
+
+type GlContext = Rc<Display>;
+
+fn get_proc_address(display: &GlContext, name: &str) -> *mut c_void {
+    let name = CString::new(name).unwrap();
+    display.get_proc_address(name.as_c_str()) as *mut c_void
+}
+
 fn main() {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
     let event_loop_proxy = event_loop.create_proxy();
+    let elp = event_loop_proxy.clone();
 
     let name = "/tmp/wt_sock".to_fs_name::<GenericFilePath>().unwrap();
 
@@ -86,7 +101,7 @@ fn main() {
         }
     });
 
-    let mut app = App::new(tx);
+    let mut app = App::new(tx, elp);
 
     event_loop.run_app(&mut app).unwrap();
 }
@@ -97,16 +112,22 @@ struct App {
     gl_context: Option<PossiblyCurrentContext>,
     window: Option<Window>,
     sender: mpsc::Sender<String>,
+    mpv_renderer: Option<RenderContext>,
+    mpv: Option<Mpv>,
+    elp: EventLoopProxy<UserEvent>,
 }
 
 impl App {
-    fn new(sender: mpsc::Sender<String>) -> Self {
+    fn new(sender: mpsc::Sender<String>, elp: EventLoopProxy<UserEvent>) -> Self {
         App {
             renderer: None,
             gl_surface: None,
             gl_context: None,
             window: None,
             sender,
+            mpv_renderer: None,
+            mpv: None,
+            elp,
         }
     }
 }
@@ -150,6 +171,7 @@ enum Command {
 #[derive(Debug)]
 enum UserEvent {
     IpcMessage(IpcData),
+    MpvRedrawRequested,
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -160,6 +182,7 @@ impl ApplicationHandler<UserEvent> for App {
             .build();
 
         let window_attributes = Window::default_attributes()
+            .with_inner_size(LogicalSize::new(960, 540))
             .with_transparent(true)
             .with_title("Watch Together");
 
@@ -168,15 +191,26 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
 
         let raw_display_handle = event_loop.display_handle().unwrap().as_raw();
-        
+
         #[cfg(windows)]
-        let gl_display =
-            unsafe { Display::new(raw_display_handle, DisplayApiPreference::Wgl(Some(self.window.as_ref().unwrap().window_handle().unwrap().as_raw()))).unwrap() };
+        let gl_display = unsafe {
+            Display::new(
+                raw_display_handle,
+                DisplayApiPreference::Wgl(Some(
+                    self.window
+                        .as_ref()
+                        .unwrap()
+                        .window_handle()
+                        .unwrap()
+                        .as_raw(),
+                )),
+            )
+            .unwrap()
+        };
 
         #[cfg(unix)]
         let gl_display =
             unsafe { Display::new(raw_display_handle, DisplayApiPreference::Egl).unwrap() };
-
 
         let configs = unsafe { gl_display.find_configs(template).unwrap() };
 
@@ -193,12 +227,17 @@ impl ApplicationHandler<UserEvent> for App {
             })
             .unwrap();
 
-
         let size = self.window.as_ref().unwrap().inner_size();
         let width = size.width;
         let height = size.height;
 
-        let raw_window_handle = self.window.as_ref().unwrap().window_handle().unwrap().as_raw();
+        let raw_window_handle = self
+            .window
+            .as_ref()
+            .unwrap()
+            .window_handle()
+            .unwrap()
+            .as_raw();
 
         let surface_attributes = SurfaceAttributesBuilder::<WindowSurface>::new().build(
             raw_window_handle,
@@ -232,6 +271,36 @@ impl ApplicationHandler<UserEvent> for App {
 
         self.renderer
             .get_or_insert_with(|| Renderer::new(&gl_config.display()));
+
+        self.mpv = Some(
+            Mpv::with_initializer(|init| {
+                init.set_property("vo", "libmpv")?;
+                Ok(())
+            })
+            .unwrap(),
+        );
+
+        self.mpv_renderer = Some(
+            RenderContext::new(
+                unsafe { self.mpv.as_mut().unwrap().ctx.as_mut() },
+                vec![
+                    RenderParam::ApiType(RenderParamApiType::OpenGl),
+                    RenderParam::InitParams(OpenGLInitParams::<GlContext> {
+                        get_proc_address,
+                        ctx: Rc::new(gl_display),
+                    }),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let elp2 = self.elp.clone();
+        self.mpv_renderer
+            .as_mut()
+            .unwrap()
+            .set_update_callback(move || {
+                elp2.send_event(UserEvent::MpvRedrawRequested).unwrap();
+            });
 
         let gl_context = self.gl_context.as_ref().unwrap();
         let gl_surface = self.gl_surface.as_ref().unwrap();
@@ -267,11 +336,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => {
                 let gl_surface = self.gl_surface.as_ref().unwrap();
-                let window = self.window.as_ref().unwrap();
+                // let window = self.window.as_ref().unwrap();
                 let gl_context = self.gl_context.as_ref().unwrap();
                 let renderer = self.renderer.as_ref().unwrap();
                 renderer.draw();
-                window.request_redraw();
+                // window.request_redraw();
 
                 gl_surface.swap_buffers(gl_context).unwrap();
             }
@@ -289,6 +358,13 @@ impl ApplicationHandler<UserEvent> for App {
 
                 self.sender
                     .blocking_send(serde_json::to_string(&IpcData::Message(msg)).unwrap())
+                    .unwrap();
+
+                let path = "./video.mp4";
+                self.mpv
+                    .as_mut()
+                    .unwrap()
+                    .command("loadfile", &[&path, "replace"])
                     .unwrap();
             }
 
@@ -308,11 +384,29 @@ impl ApplicationHandler<UserEvent> for App {
 
                 _ => (),
             },
+            UserEvent::MpvRedrawRequested => {
+                let gl_surface = self.gl_surface.as_ref().unwrap();
+                let window = self.window.as_ref().unwrap();
+                let gl_context = self.gl_context.as_ref().unwrap();
+
+                let size = window.inner_size();
+
+                self.mpv_renderer
+                    .as_mut()
+                    .unwrap()
+                    .render::<GlContext>(0, size.width as _, size.height as _, true)
+                    .expect("Failed to draw on sdl2 window");
+
+                let renderer = self.renderer.as_ref().unwrap();
+                renderer.draw();
+
+                gl_surface.swap_buffers(gl_context).unwrap();
+            }
         }
     }
 }
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::ops::Deref;
 
 pub mod gl {
@@ -320,7 +414,7 @@ pub mod gl {
     include!(concat!(env!("OUT_DIR"), "/gl_bindings.rs"));
 }
 
-use gl::types::GLfloat;
+// use gl::types::GLfloat;
 
 pub struct Renderer {
     program: gl::types::GLuint,
@@ -419,15 +513,16 @@ impl Renderer {
     }
 
     pub fn draw(&self) {
-        self.draw_with_clear_color(0.1, 0.1, 0.1, 0.9)
+        // self.draw_with_clear_color(0.0, 0.0, 0.0, 0.0)
+        self.draw_with_clear_color()
     }
 
     pub fn draw_with_clear_color(
         &self,
-        red: GLfloat,
-        green: GLfloat,
-        blue: GLfloat,
-        alpha: GLfloat,
+        // red: GLfloat,
+        // green: GLfloat,
+        // blue: GLfloat,
+        // alpha: GLfloat,
     ) {
         unsafe {
             self.gl.UseProgram(self.program);
@@ -435,8 +530,8 @@ impl Renderer {
             self.gl.BindVertexArray(self.vao);
             self.gl.BindBuffer(gl::ARRAY_BUFFER, self.vbo);
 
-            self.gl.ClearColor(red, green, blue, alpha);
-            self.gl.Clear(gl::COLOR_BUFFER_BIT);
+            // self.gl.ClearColor(red, green, blue, alpha);
+            // self.gl.Clear(gl::COLOR_BUFFER_BIT);
             self.gl.DrawArrays(gl::TRIANGLES, 0, 3);
         }
     }
@@ -500,9 +595,9 @@ fn get_gl_string(gl: &gl::Gl, variant: gl::types::GLenum) -> Option<&'static CSt
 
 #[rustfmt::skip]
 static VERTEX_DATA: [f32; 9] = [
-    -0.5, -0.5, 0.0,
-     0.5, -0.5, 0.0,
-     0.0,  0.5, 0.0
+    -0.4, -0.7, 0.0,
+     0.4, -0.7, 0.0,
+     0.0,  0.7, 0.0
 ];
 
 // // const VERTEX_SHADER_SOURCE: &[u8] = b"
