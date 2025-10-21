@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use glutin::{
     config::{ConfigTemplateBuilder, GlConfig},
     context::PossiblyCurrentContext,
@@ -9,35 +11,82 @@ use glutin::{
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
+    event::{ElementState, KeyEvent},
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{Key, NamedKey},
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
     window::{Window, WindowId},
 };
 
-use std::{num::NonZeroU32, thread};
-use interprocess::local_socket::{GenericFilePath, Stream, prelude::*};
-use std::io::{BufReader, prelude::*};
+use interprocess::local_socket::{
+    GenericFilePath,
+    tokio::{Stream, prelude::*},
+};
+
+use serde::{Deserialize, Serialize};
+
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    runtime::Builder,
+    sync::mpsc,
+};
 
 fn main() {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
     let event_loop_proxy = event_loop.create_proxy();
 
-    let name = "/tmp/example.sock".to_fs_name::<GenericFilePath>().unwrap();
-    let mut buffer = String::with_capacity(128);
-    let conn = Stream::connect(name).unwrap();
-    let (receiver, _sender) = conn.split();
+    let name = "/tmp/wt_sock".to_fs_name::<GenericFilePath>().unwrap();
 
+    let runtime = Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_name("tokio thread")
+        .thread_stack_size(3 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
 
-    thread::spawn(move || {
-        let mut conn = BufReader::new(receiver);
-        loop {
-            conn.read_line(&mut buffer).unwrap();
-            event_loop_proxy.send_event(UserEvent::IpcMessage(buffer.clone())).unwrap();
-            buffer.clear();
+    let (tx, mut rx) = mpsc::channel::<String>(512);
+
+    runtime.spawn(async move {
+        let conn = Stream::connect(name).await.unwrap();
+        let (receiver, mut sender) = conn.split();
+
+        tokio::spawn(async move {
+            let mut buffer = String::with_capacity(1024);
+            let mut conn = BufReader::new(receiver);
+            loop {
+                match conn.read_line(&mut buffer).await {
+                    Ok(0) => {
+                        println!("Connection ended by nodejs server");
+                        break;
+                    }
+
+                    Ok(_) => {
+                        event_loop_proxy
+                            .send_event(UserEvent::IpcMessage(
+                                serde_json::from_str(&buffer.clone()).unwrap(),
+                            ))
+                            .unwrap();
+                        buffer.clear();
+                    }
+
+                    Err(_) => {
+                        println!("error occured while reading socket");
+                    }
+                };
+            }
+        });
+
+        while let Some(res) = rx.recv().await {
+            println!("info: {}", res);
+            sender
+                .write_all(format!("{}\n", res).as_bytes())
+                .await
+                .unwrap();
         }
     });
 
-    let mut app = App::new();
+    let mut app = App::new(tx);
 
     event_loop.run_app(&mut app).unwrap();
 }
@@ -47,22 +96,60 @@ struct App {
     gl_surface: Option<Surface<WindowSurface>>,
     gl_context: Option<PossiblyCurrentContext>,
     window: Option<Window>,
+    sender: mpsc::Sender<String>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(sender: mpsc::Sender<String>) -> Self {
         App {
             renderer: None,
             gl_surface: None,
             gl_context: None,
             window: None,
+            sender,
         }
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+enum IpcData {
+    Message(Message),
+    Command(Command),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Message {
+    username: String,
+    content: String,
+}
+
+impl Message {
+    fn new(username: &'static str, content: &'static str) -> Self {
+        Self {
+            username: username.to_string(),
+            content: content.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum Command {
+    Connect(String),
+    Disconnect,
+    Paused(u32),
+    Resumed(u32),
+
+    LoadVideo(String),
+    Play,
+    Pause,
+    Seek(u32),
+    Stop,
+    GetTimestamp,
+}
+
 #[derive(Debug)]
 enum UserEvent {
-    IpcMessage(String),
+    IpcMessage(IpcData),
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -182,14 +269,37 @@ impl ApplicationHandler<UserEvent> for App {
                 gl_surface.swap_buffers(gl_context).unwrap();
             }
 
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Named(NamedKey::Space),
+                        state: ElementState::Released,
+                        ..
+                    },
+                ..
+            } => {
+                let msg = Message::new("ryo", "chat msg");
+
+                self.sender
+                    .blocking_send(serde_json::to_string(&IpcData::Message(msg)).unwrap())
+                    .unwrap();
+            }
+
             _ => (),
         }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::IpcMessage(msg) => {
-                println!("{}", msg);
+            UserEvent::IpcMessage(data) => match data {
+                IpcData::Message(msg) => {
+                    println!("{}: {}", msg.username, msg.content);
+                }
+                IpcData::Command(Command::Play) => {
+                    println!("play command invoked");
+                }
+
+                _ => (),
             },
         }
     }
