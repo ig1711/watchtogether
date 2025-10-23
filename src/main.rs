@@ -38,6 +38,8 @@ use libmpv2::{
 
 use std::ffi::{CString, c_void};
 
+use ab_glyph::{point, Font, FontRef, Glyph};
+
 type GlContext = Rc<Display>;
 
 fn get_proc_address(display: &GlContext, name: &str) -> *mut c_void {
@@ -421,6 +423,7 @@ pub struct Renderer {
     vao: gl::types::GLuint,
     vbo: gl::types::GLuint,
     gl: gl::Gl,
+    texture: gl::types::GLuint,
 }
 
 impl Renderer {
@@ -457,6 +460,54 @@ impl Renderer {
             gl.DeleteShader(vertex_shader);
             gl.DeleteShader(fragment_shader);
 
+            // gl.Enable(gl::CULL_FACE);
+            gl.Enable(gl::BLEND);
+            gl.BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+
+            gl.PixelStorei(gl::UNPACK_ALIGNMENT, 1);
+
+
+            let font = FontRef::try_from_slice(include_bytes!("/usr/share/fonts/TTF/FiraCode-Regular.ttf")).unwrap();
+            
+            let q_glyph: Glyph = font
+            .glyph_id('A')
+            .with_scale_and_position(600.0, point(0.0, 0.0));
+        
+            let mut texture = std::mem::zeroed();
+            
+            font.outline_glyph(q_glyph).map(|outlined| {
+                let px_bounds = outlined.px_bounds();
+                let width = px_bounds.width().ceil() as u32;
+                let height = px_bounds.height().ceil() as u32;
+
+                let mut image = image::GrayImage::new(width, height);
+
+                outlined.draw(|x, y, val| image.put_pixel(x, y, image::Luma([(val * 255.) as u8])));
+                
+                image.reverse();
+                
+                gl.GenTextures(1, &mut texture);
+                gl.BindTexture(gl::TEXTURE_2D, texture);
+                gl.TexImage2D(
+                    gl::TEXTURE_2D,
+                    0,
+                    gl::RED as _,
+                    width as _,
+                    height as _,
+                    0,
+                    gl::RED,
+                    gl::UNSIGNED_BYTE,
+                    image.as_ptr() as *const _,
+                );
+            });
+
+            gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as _);
+            gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as _);
+            gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER,gl::LINEAR as _);
+            gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as _);
+            
+
+
             let mut vao = std::mem::zeroed();
             gl.GenVertexArrays(1, &mut vao);
             gl.BindVertexArray(vao);
@@ -466,9 +517,11 @@ impl Renderer {
             gl.BindBuffer(gl::ARRAY_BUFFER, vbo);
             gl.BufferData(
                 gl::ARRAY_BUFFER,
-                (VERTEX_DATA.len() * std::mem::size_of::<f32>()) as gl::types::GLsizeiptr,
-                VERTEX_DATA.as_ptr() as *const _,
-                gl::STATIC_DRAW,
+                (24 * std::mem::size_of::<f32>()) as gl::types::GLsizeiptr,
+                // (VERTEX_DATA.len() * std::mem::size_of::<f32>()) as gl::types::GLsizeiptr,
+                std::ptr::null(),
+                // VERTEX_DATA.as_ptr() as *const _,
+                gl::DYNAMIC_DRAW,
             );
 
             // let pos_attrib = gl.GetAttribLocation(program, b"position\0".as_ptr() as *const _);
@@ -484,10 +537,10 @@ impl Renderer {
 
             gl.VertexAttribPointer(
                 0 as gl::types::GLuint,
-                3,
+                4,
                 gl::FLOAT,
                 0,
-                3 * std::mem::size_of::<f32>() as gl::types::GLsizei,
+                4 * std::mem::size_of::<f32>() as gl::types::GLsizei,
                 std::ptr::null(),
             );
 
@@ -502,12 +555,15 @@ impl Renderer {
             // gl.EnableVertexAttribArray(pos_attrib as gl::types::GLuint);
             gl.EnableVertexAttribArray(0 as gl::types::GLuint);
             // gl.EnableVertexAttribArray(color_attrib as gl::types::GLuint);
+            
+            
 
             Self {
                 program,
                 vao,
                 vbo,
                 gl,
+                texture,
             }
         }
     }
@@ -526,13 +582,32 @@ impl Renderer {
     ) {
         unsafe {
             self.gl.UseProgram(self.program);
+            self.gl.Enable(gl::BLEND);
+            self.gl.BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+
 
             self.gl.BindVertexArray(self.vao);
             self.gl.BindBuffer(gl::ARRAY_BUFFER, self.vbo);
 
             // self.gl.ClearColor(red, green, blue, alpha);
             // self.gl.Clear(gl::COLOR_BUFFER_BIT);
-            self.gl.DrawArrays(gl::TRIANGLES, 0, 3);
+
+            self.gl.ActiveTexture(gl::TEXTURE0);
+
+            let vertices: [f32; 24] = [
+                0.0 - 0.5 + 0.2, 0.0 - 0.5, 0.0, 0.0,
+                0.0 - 0.5 + 0.2, 1.0 - 0.5, 0.0, 1.0,
+                1.0 - 0.5 - 0.2, 1.0 - 0.5, 1.0, 1.0,
+                0.0 - 0.5 + 0.2, 0.0 - 0.5, 0.0, 0.0,
+                1.0 - 0.5 - 0.2, 1.0 - 0.5, 1.0, 1.0,
+                1.0 - 0.5 - 0.2, 0.0 - 0.5, 1.0, 0.0,
+            ];
+
+            self.gl.BindTexture(gl::TEXTURE_2D, self.texture);
+
+            self.gl.BufferSubData(gl::ARRAY_BUFFER, 0, 24 * std::mem::size_of::<f32>() as gl::types::GLsizeiptr, vertices.as_ptr() as *const _);
+
+            self.gl.DrawArrays(gl::TRIANGLES, 0, 6);
         }
     }
 
@@ -593,12 +668,17 @@ fn get_gl_string(gl: &gl::Gl, variant: gl::types::GLenum) -> Option<&'static CSt
 // //      0.5, -0.5,  0.0,  0.0,  1.0,
 // // ];
 
-#[rustfmt::skip]
-static VERTEX_DATA: [f32; 9] = [
-    -0.4, -0.7, 0.0,
-     0.4, -0.7, 0.0,
-     0.0,  0.7, 0.0
-];
+// #[rustfmt::skip]
+// static VERTEX_DATA: [f32; 12] = [
+//     -0.5, -0.5,
+//     -0.5,  0.0,
+//      0.0, -0.5,
+
+//     -0.5,  0.0,
+//      0.0, -0.5,
+//      0.0,  0.0,
+
+// ];
 
 // // const VERTEX_SHADER_SOURCE: &[u8] = b"
 // // #version 100
@@ -617,11 +697,13 @@ static VERTEX_DATA: [f32; 9] = [
 
 const VERTEX_SHADER_SOURCE: &[u8] = b"
 #version 460 core
-layout (location = 0) in vec3 aPos;
+layout (location = 0) in vec4 vertex;
+out vec2 TexCoords;
 
 void main()
 {
-    gl_Position = vec4(aPos.x, aPos.y, aPos.z, 1.0);
+    gl_Position = vec4(vertex.xy, 0.0, 1.0);
+    TexCoords = vertex.zw;
 }
 \0";
 
@@ -638,10 +720,14 @@ void main()
 
 const FRAGMENT_SHADER_SOURCE: &[u8] = b"
 #version 460 core
-out vec4 FragColor;
+in vec2 TexCoords;
+out vec4 color;
+
+uniform sampler2D text;
 
 void main()
-{
-    FragColor = vec4(1.0f, 1.0f, 0.2f, 1.0f);
-}
+{    
+    color = vec4(1.0, 1.0, 1.0, texture(text, TexCoords).r);
+    // color = vec4(1.0, 1.0, 1.0, 1.0);
+}  
 \0";
