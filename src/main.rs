@@ -21,7 +21,7 @@ use winit::{
 };
 
 use interprocess::local_socket::{
-    GenericFilePath,
+    GenericFilePath, GenericNamespaced,
     tokio::{Stream, prelude::*},
 };
 
@@ -52,7 +52,7 @@ fn main() {
     let event_loop_proxy = event_loop.create_proxy();
     let elp = event_loop_proxy.clone();
 
-    let name = "/tmp/wt_sock".to_fs_name::<GenericFilePath>().unwrap();
+    let name = "wt_sock".to_ns_name::<GenericNamespaced>().unwrap();
 
     let runtime = Builder::new_multi_thread()
         .worker_threads(4)
